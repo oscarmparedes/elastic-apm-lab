@@ -1,0 +1,124 @@
+version: '2.2'
+services:
+  apm-server:
+    image: docker.elastic.co/apm/apm-server:7.12.1
+    environment:
+    - ES_JAVA_OPTS=-XX:UseAVX=2 -Xms1g -Xmx1g
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      kibana:
+        condition: service_healthy
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
+    cap_drop: ["ALL"]
+    ports:
+    - 8200:8200
+    networks:
+    - elastic
+    command: >
+       apm-server -e
+         -E apm-server.rum.enabled=true
+         -E setup.kibana.host=kibana:5601
+         -E setup.template.settings.index.number_of_replicas=0
+         -E apm-server.kibana.enabled=true
+         -E apm-server.kibana.host=kibana:5601
+         -E output.elasticsearch.hosts=["elasticsearch:9200"]
+    healthcheck:
+      interval: 10s
+      retries: 12
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:8200/
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.12.1
+    environment:
+    - bootstrap.memory_lock=true
+    - cluster.name=docker-cluster
+    - cluster.routing.allocation.disk.threshold_enabled=false
+    - discovery.type=single-node
+    - ES_JAVA_OPTS=-XX:UseAVX=2 -Xms512m -Xmx512m
+    ulimits:
+      memlock:
+        hard: -1
+        soft: -1
+    volumes:
+    - esdata:/usr/share/elasticsearch/data
+    ports:
+    - 9200:9200
+    networks:
+    - elastic
+    healthcheck:
+      interval: 20s
+      retries: 10
+      test: curl -s http://localhost:9200/_cluster/health | grep -vq '"status":"red"'
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.12.1
+    depends_on:
+      - elasticsearch
+#        condition: service_healthy
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+    - 5601:5601
+    networks:
+    - elastic
+    healthcheck:
+      interval: 10s
+      retries: 20
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:5601/api/status
+  airsonic:
+    image: ghcr.io/linuxserver/airsonic
+    container_name: airsonic
+    environment:
+      - PUID=1000
+      - PGID=1000
+#         - TZ=Europe/London
+#         - CONTEXT_PATH=/airsonic
+      - JAVA_OPTS=-javaagent:/apm/elastic-apm-agent-1.23.0.jar -Delastic.apm.service_name=airsonic -Delastic.apm.server_url=http://apm-server:8200
+    volumes:
+      - ./apm:/apm
+#         - music:/music
+#         - playlists:/playlists
+#         - podcasts:/podcasts
+#         - media:/media #optional
+#    command: 'java -javaagent:/apm/elastic-apm-agent-1.23.0.jar -Delastic.apm.service_name=airsonic -Delastic.apm.application_packages=org.example,org.another.example -Delastic.apm.server_url=http://apm-server:8200'
+    ports:
+      - 4040:4040
+#       devices:
+#         - /dev/snd:/dev/snd #optional
+    restart: unless-stopped
+    networks:
+      - elastic
+
+  metricbeat:
+    build: ./metricbeat
+#    image: docker.elastic.co/beats/metricbeat:7.12.1
+    container_name: metricbeat
+    user: root
+    environment:
+      - output.elasticsearch.hosts=["elasticsearch:9200"]
+      - setup.kibana.host=kibana:5601
+    volumes:
+#      - $PWD/metricbeat:/usr/share/metricbeat/:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys/fs/cgroup:/hostfs/sys/fs/cgroup:ro
+      - /proc:/hostfs/proc:ro
+      - /:/hostfs:ro
+    restart: unless-stopped
+#    entrypoint: bash -c 'export PATH=/usr/share/metricbeat && /usr/local/bin/docker-entrypoint -e'
+    networks:
+      - elastic
+      - prom_stack_back-tier
+
+
+volumes:
+  esdata:
+    driver: local
+
+networks:
+  elastic:
+    driver: bridge
+  prom_stack_back-tier:
+    external:
+      true
